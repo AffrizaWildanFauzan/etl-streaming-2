@@ -1,0 +1,4 @@
+-r requirements.txt
+-r requirements-airflow.txt
+pytest>=8,<9
+pytest-cov>=5,<7
