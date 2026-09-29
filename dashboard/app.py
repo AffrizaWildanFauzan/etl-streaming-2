@@ -180,22 +180,37 @@ with st.sidebar:
     refresh_seconds = st.slider("Auto-refresh (detik)", 10, 120, 30)
 
 
+NO_TRAFFIC_HELP = """
+**Belum ada data lalu lintas.** Jika sudah lebih dari ±1 menit setelah `make up`, kemungkinan besar
+producer berhenti. Cek dengan `make logs s=producer`. Penyebab umum:
+
+- `TOMTOM_API_KEY` di `infrastructure/.env` masih kosong atau salah → isi key dari
+  https://developer.tomtom.com, lalu jalankan `make up` lagi.
+- Hanya ingin mencoba tanpa key → set `TRAFFIC_SOURCE=simulator` (data sintetis), lalu `make up`.
+
+Tab lain (lingkungan, insiden, prediksi) tetap bisa dilihat di bawah.
+"""
+
+
 @st.fragment(run_every=refresh_seconds)
 def live_view() -> None:
     try:
         latest = query(LATEST_SQL)
-        if latest.empty:
-            st.info("Belum ada data lalu lintas. Tunggu producer & processor berjalan...")
-            return
-        if (latest["source"] == "simulator").any():
-            st.warning("Sebagian data berasal dari SIMULATOR (bukan TomTom). Isi TOMTOM_API_KEY "
-                       "dan set TRAFFIC_SOURCE=tomtom untuk data real.")
         incidents = query(INCIDENTS_SQL)
         env = query(ENVIRONMENT_SQL, city=CITY)
-        render_kpis(latest, incidents, env)
+        if latest.empty:
+            st.warning(NO_TRAFFIC_HELP)
+        else:
+            if (latest["source"] == "simulator").any():
+                st.warning("Sebagian data berasal dari SIMULATOR (bukan TomTom). Isi TOMTOM_API_KEY "
+                           "dan set TRAFFIC_SOURCE=tomtom untuk data real.")
+            render_kpis(latest, incidents, env)
         tabs = st.tabs(["Lalu lintas live", "Insiden", "Lingkungan", "Prediksi"])
         with tabs[0]:
-            render_live(latest, incidents, trend_hours)
+            if latest.empty:
+                st.info("Menunggu data dari producer TomTom.")
+            else:
+                render_live(latest, incidents, trend_hours)
         with tabs[1]:
             render_incidents(incidents)
         with tabs[2]:
