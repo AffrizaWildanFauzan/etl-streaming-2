@@ -30,6 +30,7 @@ log = logging.getLogger("producer")
 DEFAULT_POLL_SECONDS = 360
 FLUSH_TIMEOUT_SECONDS = 10
 EXIT_AUTH_ERROR = 2
+EXIT_CONFIG_ERROR = 3
 
 
 def build_client(source: str):
@@ -114,7 +115,13 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     source = env("TRAFFIC_SOURCE", "tomtom")
     poll_seconds = env_int("POLL_SECONDS", DEFAULT_POLL_SECONDS)
-    client = build_client(source)
+    try:
+        client = build_client(source)
+    except (RuntimeError, ValueError) as exc:
+        log.error("%s. Isi TOMTOM_API_KEY di infrastructure/.env (daftar gratis di "
+                  "https://developer.tomtom.com), atau set TRAFFIC_SOURCE=simulator untuk testing.",
+                  exc)
+        sys.exit(EXIT_CONFIG_ERROR)
     producer = Producer({
         "bootstrap.servers": kafka_config().bootstrap,
         "enable.idempotence": True,
