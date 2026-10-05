@@ -11,14 +11,38 @@ from psycopg2.extras import execute_values
 
 from common.config import postgres_config
 
-WEATHER_COLUMNS = ("temperature", "relative_humidity", "precipitation", "rain",
-                   "wind_speed", "weather_code")
+WEATHER_COLUMNS = (
+    "temperature",
+    "relative_humidity",
+    "precipitation",
+    "rain",
+    "wind_speed",
+    "weather_code",
+)
 AIR_QUALITY_COLUMNS = ("pm2_5", "pm10", "carbon_monoxide", "nitrogen_dioxide", "us_aqi")
+
+# Kueri dataset latihan yang diperbarui: menyertakan agregasi insiden aktif per jam
 TRAINING_SQL = """
-SELECT point_id, hour, avg_congestion, temperature, relative_humidity, precipitation, wind_speed
-FROM mart_traffic_features
-ORDER BY hour
+SELECT 
+    m.point_id, 
+    m.hour, 
+    m.avg_congestion, 
+    m.temperature, 
+    m.relative_humidity, 
+    m.precipitation, 
+    m.wind_speed,
+    COALESCE(i.active_incidents, 0) AS active_incidents
+FROM mart_traffic_features m
+LEFT JOIN (
+    SELECT 
+        date_trunc('hour', first_seen_at) AS hour,
+        count(*) AS active_incidents
+    FROM traffic_incidents
+    GROUP BY 1
+) i ON m.hour = i.hour
+ORDER BY m.hour
 """
+
 WEATHER_WINDOW_SQL = """
 SELECT observed_hour AS hour, temperature, relative_humidity, precipitation, wind_speed
 FROM weather_hourly
@@ -33,17 +57,26 @@ def connect():
         yield conn
 
 
-def _upsert_hourly(conn: PgConnection, table: str, columns: Sequence[str],
-                   city: str, rows: Sequence[dict]) -> int:
+def _upsert_hourly(
+    conn: PgConnection,
+    table: str,
+    columns: Sequence[str],
+    city: str,
+    rows: Sequence[dict],
+) -> int:
     """Upsert per (city, jam). Data aktual menimpa prakiraan sebelumnya untuk jam yang sama."""
     if not rows:
         return 0
     all_columns = ("city", "observed_hour", *columns, "is_forecast")
     updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in (*columns, "is_forecast"))
-    sql = (f"INSERT INTO {table} ({', '.join(all_columns)}) VALUES %s "
-           f"ON CONFLICT (city, observed_hour) DO UPDATE SET {updates}, loaded_at = now()")
-    values = [(city, r["observed_hour"], *(r.get(c) for c in columns), r["is_forecast"])
-              for r in rows]
+    sql = (
+        f"INSERT INTO {table} ({', '.join(all_columns)}) VALUES %s "
+        f"ON CONFLICT (city, observed_hour) DO UPDATE SET {updates}, loaded_at = now()"
+    )
+    values = [
+        (city, r["observed_hour"], *(r.get(c) for c in columns), r["is_forecast"])
+        for r in rows
+    ]
     with conn.cursor() as cur:
         execute_values(cur, sql, values)
     return len(values)
@@ -65,17 +98,37 @@ def _frame(conn: PgConnection, sql: str, params: tuple = ()) -> pd.DataFrame:
 
 
 def load_training_frame(conn: PgConnection) -> pd.DataFrame:
+    """Memuat dataframe historis untuk training model ML dengan fitur yang sudah dikonversi."""
     df = _frame(conn, TRAINING_SQL)
-    numeric = ["avg_congestion", "temperature", "relative_humidity", "precipitation", "wind_speed"]
-    return df.astype({c: float for c in numeric}) if not df.empty else df
+    numeric = [
+        "avg_congestion",
+        "temperature",
+        "relative_humidity",
+        "precipitation",
+        "wind_speed",
+        "active_incidents",
+    ]
+    return df.astype({c: float for c in numeric if c in df.columns}) if not df.empty else df
 
 
-def load_weather_window(conn: PgConnection, city: str, start: datetime, end: datetime) -> pd.DataFrame:
+def load_weather_window(
+    conn: PgConnection, city: str, start: datetime, end: datetime
+) -> pd.DataFrame:
     return _frame(conn, WEATHER_WINDOW_SQL, (city, start, end))
 
 
-def save_model_run(conn: PgConnection, version: str, train_rows: int, test_rows: int,
-                   mae: float, rmse: float, baseline_mae: float, features: Sequence[str]) -> None:
+def save_model_run(
+    conn: PgConnection,
+    version: str,
+    train_rows: int,
+    test_rows: int,
+    mae: float,
+    rmse: float,
+    baseline_mae: float,
+    features: Sequence[str],
+    cv_mae_mean: float | None = None,
+) -> None:
+    """Menyimpan ringkasan performa pelatihan model ke tabel model_runs."""
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO model_runs (model_version, train_rows, test_rows, mae, rmse, "
@@ -85,10 +138,15 @@ def save_model_run(conn: PgConnection, version: str, train_rows: int, test_rows:
 
 
 def save_forecasts(conn: PgConnection, forecast: pd.DataFrame, version: str) -> int:
-    rows = [(r.point_id, r.hour, float(r.predicted_congestion), r.predicted_level, version)
-            for r in forecast.itertuples()]
+    """Menyimpan hasil prediksi kemacetan 24 jam ke tabel traffic_forecast."""
+    rows = [
+        (r.point_id, r.hour, float(r.predicted_congestion), r.predicted_level, version)
+        for r in forecast.itertuples()
+    ]
     with conn.cursor() as cur:
-        execute_values(cur, """
+        execute_values(
+            cur,
+            """
             INSERT INTO traffic_forecast (point_id, target_hour, predicted_congestion,
                                           predicted_level, model_version)
             VALUES %s
@@ -96,5 +154,7 @@ def save_forecasts(conn: PgConnection, forecast: pd.DataFrame, version: str) -> 
                 predicted_congestion = EXCLUDED.predicted_congestion,
                 predicted_level = EXCLUDED.predicted_level,
                 model_version = EXCLUDED.model_version, created_at = now()
-        """, rows)
+        """,
+            rows,
+        )
     return len(rows)
