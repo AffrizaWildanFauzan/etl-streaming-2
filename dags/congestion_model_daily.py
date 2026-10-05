@@ -19,10 +19,18 @@ from airflow.exceptions import AirflowSkipException
 from common.config import env
 from common.points import CITY, MONITORING_POINTS
 from modeling.congestion_model import (
-    CATEGORICAL_FEATURES, NUMERIC_FEATURES, NotEnoughData, forecast, train_and_evaluate,
+    CATEGORICAL_FEATURES,
+    NUMERIC_FEATURES,
+    NotEnoughData,
+    forecast,
+    train_and_evaluate,
 )
 from storage.batch_store import (
-    connect, load_training_frame, load_weather_window, save_forecasts, save_model_run,
+    connect,
+    load_training_frame,
+    load_weather_window,
+    save_forecasts,
+    save_model_run,
 )
 
 log = logging.getLogger(__name__)
@@ -36,11 +44,17 @@ def _model_path() -> Path:
 
 def _future_frame(weather: pd.DataFrame, start: datetime) -> pd.DataFrame:
     hours = pd.date_range(start, periods=FORECAST_HOURS, freq="h", tz="UTC")
-    grid = pd.DataFrame([(p.point_id, h) for p in MONITORING_POINTS for h in hours],
-                        columns=["point_id", "hour"])
+    grid = pd.DataFrame(
+        [(p.point_id, h) for p in MONITORING_POINTS for h in hours],
+        columns=["point_id", "hour"],
+    )
     if weather.empty:
-        return grid.assign(temperature=None, relative_humidity=None,
-                           precipitation=None, wind_speed=None)
+        return grid.assign(
+            temperature=None,
+            relative_humidity=None,
+            precipitation=None,
+            wind_speed=None,
+        )
     weather = weather.assign(hour=pd.to_datetime(weather["hour"], utc=True))
     return grid.merge(weather, on="hour", how="left")
 
@@ -70,27 +84,55 @@ def congestion_model_daily():
         path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(result.pipeline, path)
         with connect() as conn:
-            save_model_run(conn, version, result.train_rows, result.test_rows, result.mae,
-                           result.rmse, result.baseline_mae,
-                           CATEGORICAL_FEATURES + NUMERIC_FEATURES)
+            save_model_run(
+                conn,
+                version,
+                result.train_rows,
+                result.test_rows,
+                result.mae,
+                result.rmse,
+                result.baseline_mae,
+                CATEGORICAL_FEATURES + NUMERIC_FEATURES,
+                cv_mae_mean=result.cv_mae_mean,
+            )
             conn.commit()
-        log.info("Model %s: MAE=%.4f RMSE=%.4f (baseline MAE=%.4f)",
-                 version, result.mae, result.rmse, result.baseline_mae)
+        log.info(
+            "Model %s: MAE=%.4f RMSE=%.4f (CV MAE=%.4f, baseline MAE=%.4f)",
+            version,
+            result.mae,
+            result.rmse,
+            result.cv_mae_mean,
+            result.baseline_mae,
+        )
         return version
 
     @task
     def forecast_next_24h(version: str) -> int:
         start = pd.Timestamp.now(tz="UTC").ceil("h").to_pydatetime()
         with connect() as conn:
-            weather = load_weather_window(conn, CITY, start, start + timedelta(hours=FORECAST_HOURS))
+            weather = load_weather_window(
+                conn, CITY, start, start + timedelta(hours=FORECAST_HOURS)
+            )
         future = _future_frame(weather, start)
-        predictions = forecast(joblib.load(_model_path()), future.astype(
-            {c: float for c in ("temperature", "relative_humidity", "precipitation", "wind_speed")}))
+
+        # Mengonversi kolom numerik cuaca yang tersedia secara aman ke tipe float
+        numeric_cols = [
+            c
+            for c in ("temperature", "relative_humidity", "precipitation", "wind_speed")
+            if c in future.columns
+        ]
+        future_cast = future.astype({c: float for c in numeric_cols})
+
+        predictions = forecast(joblib.load(_model_path()), future_cast)
         with connect() as conn:
             count = save_forecasts(conn, predictions, version)
             conn.commit()
-        log.info("Prakiraan tersimpan: %d baris (%d titik x %d jam)",
-                 count, len(MONITORING_POINTS), FORECAST_HOURS)
+        log.info(
+            "Prakiraan tersimpan: %d baris (%d titik x %d jam)",
+            count,
+            len(MONITORING_POINTS),
+            FORECAST_HOURS,
+        )
         return count
 
     forecast_next_24h(train_model())
