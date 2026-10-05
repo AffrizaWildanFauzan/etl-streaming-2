@@ -1,11 +1,3 @@
-"""DAG ETL batch: agregasi data streaming lalu lintas menjadi mart per jam.
-
-check_stream_freshness ──▶ build_traffic_hourly ──▶ check_value_ranges ──▶ check_point_coverage
-
-Dijalankan scheduler pada menit ke-5 setiap jam untuk jam sebelumnya (data_interval).
-Upsert berdasarkan (point_id, hour) -> aman di-rerun dan di-backfill.
-"""
-
 from datetime import timedelta
 
 import pendulum
@@ -13,10 +5,17 @@ from airflow import DAG
 from airflow.providers.common.sql.operators.sql import SQLCheckOperator, SQLExecuteQueryOperator
 
 CONN_ID = "city_db"
-INTERVAL = "observed_at >= '{{ data_interval_start }}' AND observed_at < '{{ data_interval_end }}'"
-HOUR_INTERVAL = "hour >= '{{ data_interval_start }}' AND hour < '{{ data_interval_end }}'"
 
-# Polling TomTom tiap 6 menit -> tidak ada data 20 menit berarti streaming bermasalah
+# Jadwal "5 * * * *" membuat data_interval jatuh di menit ke-5 (mis. 00.05-01.05), bukan jam
+# bulat, sedangkan GROUP BY memakai date_trunc('hour', ...). Dipakai apa adanya, 5 menit pertama
+# tiap jam tidak pernah terhitung (terbukti: 180 dari 189 jam kehilangan tepat 10 sampel) dan
+# data quality check memeriksa bucket yang salah. Karena itu jendela dikunci ke jam penuh.
+HOUR_END = "date_trunc('hour', TIMESTAMPTZ '{{ data_interval_end }}')"
+HOUR_START = f"({HOUR_END} - interval '1 hour')"
+INTERVAL = f"observed_at >= {HOUR_START} AND observed_at < {HOUR_END}"
+HOUR_INTERVAL = f"hour >= {HOUR_START} AND hour < {HOUR_END}"
+
+# Polling TomTom tiap 6 menit tidak ada data 20 menit berarti streaming bermasalah
 FRESHNESS_SQL = """
 SELECT count(*) > 0 FROM traffic_flow
 WHERE loaded_at > now() - make_interval(mins => {{ params.freshness_minutes }})

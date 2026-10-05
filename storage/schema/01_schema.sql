@@ -7,7 +7,11 @@ CREATE TABLE IF NOT EXISTS monitoring_points (
     corridor   TEXT             NOT NULL,
     name       TEXT             NOT NULL,
     latitude   DOUBLE PRECISION NOT NULL,
-    longitude  DOUBLE PRECISION NOT NULL
+    longitude  DOUBLE PRECISION NOT NULL,
+    -- Kota tempat titik ini berada; dipakai menjodohkan data cuaca & kualitas udara yang
+    -- primary key-nya (city, observed_hour). Tanpa ini, join hanya lewat jam akan
+    -- menggandakan baris begitu ada kota kedua.
+    city       TEXT             NOT NULL DEFAULT 'Surabaya'
 );
 
 -- ================= STREAMING (Kafka -> processor) =================
@@ -104,8 +108,8 @@ SELECT t.point_id, p.corridor, t.hour, t.avg_speed, t.avg_congestion, t.max_cong
        a.pm2_5, a.pm10, a.carbon_monoxide, a.nitrogen_dioxide, a.us_aqi
 FROM traffic_hourly t
 JOIN monitoring_points p USING (point_id)
-LEFT JOIN weather_hourly w     ON w.observed_hour = t.hour
-LEFT JOIN air_quality_hourly a ON a.observed_hour = t.hour;
+LEFT JOIN weather_hourly w     ON w.observed_hour = t.hour AND w.city = p.city
+LEFT JOIN air_quality_hourly a ON a.observed_hour = t.hour AND a.city = p.city;
 
 -- ================= MODEL (DAG congestion_model_daily) =================
 CREATE TABLE IF NOT EXISTS model_runs (
@@ -140,7 +144,8 @@ FROM traffic_flow f
 JOIN monitoring_points p USING (point_id)
 ORDER BY f.point_id, f.observed_at DESC;
 
--- Insiden dianggap aktif jika masih terlihat pada polling 15 menit terakhir
+-- Insiden dianggap aktif jika masih terlihat dalam 15 menit terakhir DARI DATA, bukan dari jam
+-- sistem. Dengan now(), view ini kosong setiap kali pengumpulan data sudah berhenti.
 CREATE OR REPLACE VIEW v_active_incidents AS
 SELECT * FROM traffic_incidents
-WHERE last_seen_at > now() - interval '15 minutes';
+WHERE last_seen_at > (SELECT max(last_seen_at) FROM traffic_incidents) - interval '15 minutes';

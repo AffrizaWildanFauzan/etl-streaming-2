@@ -28,8 +28,11 @@ NUMERIC_FEATURES = [
 ]
 TARGET = "avg_congestion"
 
-# Minimal 3 hari data historis penuh untuk 9 titik pantau (9 titik x 24 jam x 3 hari = 648 baris)
-MIN_TRAIN_ROWS = 648
+# Dihitung dari JUMLAH JAM BERBEDA, bukan jumlah baris: baris tumbuh sebanyak titik pantau tiap
+# jam (9 titik -> 9 baris/jam), jadi ambang berbasis baris ikut berubah kalau jumlah titik
+# berubah. Fitur hour_of_day, day_of_week, dan lag_24h butuh beberapa hari penuh; kalau tidak,
+# sebagian besar jam tidak pernah terlihat saat training.
+MIN_TRAIN_HOURS = 72  # 3 hari penuh
 TEST_FRACTION = 0.2
 RANDOM_STATE = 42
 
@@ -106,9 +109,12 @@ def baseline_predict(train: pd.DataFrame, test: pd.DataFrame) -> np.ndarray:
 
 
 def train_and_evaluate(history: pd.DataFrame) -> TrainResult:
-    if len(history) < MIN_TRAIN_ROWS:
-        raise NotEnoughData(f"butuh >= {MIN_TRAIN_ROWS} baris, tersedia {len(history)}")
-
+    distinct_hours = 0 if history.empty else history["hour"].nunique()
+    if distinct_hours < MIN_TRAIN_HOURS:
+        raise NotEnoughData(
+            f"butuh >= {MIN_TRAIN_HOURS} jam data historis, tersedia {distinct_hours} jam "
+            f"({len(history)} baris)"
+        )
     data = add_engineered_features(history.dropna(subset=[TARGET]))
     train, test = time_split(data)
 

@@ -14,7 +14,7 @@ POINTS = ("AY-01", "DR-02", "MR-03")
 
 
 def synthetic_history(days: int = 10, seed: int = 0) -> pd.DataFrame:
-    """Kemacetan sintetis 10 hari (720 baris) untuk menguji pipeline model (> 648 MIN_TRAIN_ROWS)."""
+    """Kemacetan sintetis 10 hari (720 baris) untuk menguji pipeline model (240 jam > 72 MIN_TRAIN_HOURS)."""
     rng = np.random.default_rng(seed)
     hours = pd.date_range("2026-09-01", periods=days * 24, freq="h", tz="UTC")
     rows = []
@@ -91,4 +91,26 @@ def test_forecast_is_bounded_and_labelled():
 
 def test_too_little_data_raises():
     with pytest.raises(NotEnoughData):
-        train_and_evaluate(synthetic_history().head(100))
+        train_and_evaluate(synthetic_history().head(10))
+
+
+def test_requires_several_days_of_history_not_just_rows():
+    """Banyak baris dari sedikit jam harus tetap ditolak (9 titik x 5 jam = 45 baris)."""
+    hours = pd.date_range("2026-09-01", periods=5, freq="h", tz="UTC")
+    many_rows_few_hours = pd.DataFrame([
+        {"point_id": f"P-{i:02d}", "hour": ts, "avg_congestion": 0.4, "temperature": 29.0,
+         "relative_humidity": 70.0, "precipitation": 0.0, "wind_speed": 10.0,
+         "active_incidents": 0}
+        for i in range(9) for ts in hours
+    ])
+    assert len(many_rows_few_hours) == 45
+
+    with pytest.raises(NotEnoughData, match="jam data historis"):
+        train_and_evaluate(many_rows_few_hours)
+
+
+def test_three_full_days_is_enough_to_train():
+    history = synthetic_history(days=3)
+    assert history["hour"].nunique() == 72
+    result = train_and_evaluate(history)
+    assert result.train_rows > 0 and result.test_rows > 0
