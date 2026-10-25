@@ -17,6 +17,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
+from common.config import env_int
 from common.points import TIMEZONE
 from processing.stream.traffic_transform import congestion_level
 
@@ -32,7 +33,12 @@ TARGET = "avg_congestion"
 # jam (9 titik -> 9 baris/jam), jadi ambang berbasis baris ikut berubah kalau jumlah titik
 # berubah. Fitur hour_of_day, day_of_week, dan lag_24h butuh beberapa hari penuh; kalau tidak,
 # sebagian besar jam tidak pernah terlihat saat training.
-MIN_TRAIN_HOURS = 72  # 3 hari penuh
+# Ekspor CSV yang dipakai simulasi hanya mencakup 55 jam, di bawah default 72, sehingga
+# training akan selalu ditolak. Ambang itu kini bisa diturunkan lewat environment untuk
+# demo, tapi tidak pernah di bawah 48 jam (2 hari): lag_24h butuh satu hari penuh di
+# belakangnya, dan di bawah dua hari fitur day_of_week praktis konstan.
+ABSOLUTE_MIN_TRAIN_HOURS = 48
+MIN_TRAIN_HOURS = max(env_int("MIN_TRAIN_HOURS", 72), ABSOLUTE_MIN_TRAIN_HOURS)
 TEST_FRACTION = 0.2
 RANDOM_STATE = 42
 
