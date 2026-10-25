@@ -29,32 +29,63 @@ dari sumber asli.
 
 ## Arsitektur
 
-```
-                       ETL STREAMING (Apache Kafka)
-┌──────────────────────┐   poll /6 mnt   ┌───────────────────────┐    ┌─────────────────────┐
-│ TomTom Traffic API   │───────────────▶│ traffic.flow.raw      │───▶│ stream processor    │
-│ • Flow (9 titik)     │   producer      │ traffic.incidents.raw │    │ validasi, metrik    │──┐
-│ • Incidents (bbox)   │                 └───────────────────────┘    │ kemacetan, dedup    │  │
-└──────────────────────┘                    traffic.dlq ◀─────────────┴─────────────────────┘  │
-┌──────────────────────┐                                                                       │
-│ CSV hasil ekspor     │──── csv_replay ──────────▶ (topik yang sama)                           │
-│ data/raw/*.csv       │     jendela 6 menit                                                    │
-└──────────────────────┘                                                                       ▼
-                       ETL BATCH (Apache Airflow, terjadwal)                        ┌────────────────┐
-┌──────────────────────┐  tiap jam :10  ┌────────────────────────────┐              │  PostgreSQL    │
-│ Open-Meteo Weather   │──────────────▶│ weather_air_quality_hourly │─────────────▶│  traffic_flow  │
-│ Open-Meteo Air Qual. │                └────────────────────────────┘              │  incidents     │
-└──────────────────────┘                ┌────────────────────────────┐              │  weather/AQ    │
-                          tiap jam :05  │ traffic_hourly_mart        │◀────────────▶│  traffic_hourly│
-                                        └────────────────────────────┘              │  forecast      │
-                          harian 00.30  ┌────────────────────────────┐              └───────┬────────┘
-                          WIB           │ congestion_model_daily (ML)│◀────────────▶        │
-                                        └────────────────────────────┘                      ▼
-                                                                                 Dashboard Streamlit
+Pola lambda sederhana: dua jalur pemrosesan yang bermuara pada satu basis data.
+
+```mermaid
+flowchart LR
+    TT[TomTom Traffic API<br/>Flow 9 titik + Incidents]
+    CSV[(data/raw<br/>ekspor CSV lalu lintas)]
+    OM[Open-Meteo<br/>Weather + Air Quality]
+    CSVB[(data/raw<br/>ekspor CSV cuaca)]
+
+    TT -->|poll 6 menit| PR[producer]
+    CSV -->|csv_replay<br/>jendela 6 menit| PR
+
+    subgraph KF[Apache Kafka - mode KRaft]
+        FLOW[traffic.flow.raw]
+        INC[traffic.incidents.raw]
+        DLQ[traffic.dlq]
+    end
+
+    PR --> FLOW
+    PR --> INC
+    FLOW --> SP[stream processor<br/>validasi, metrik kemacetan]
+    INC --> SP
+    SP -->|record tidak valid| DLQ
+    SP -->|ON CONFLICT DO NOTHING| DB
+
+    subgraph AF[Apache Airflow - 3 DAG terjadwal]
+        WX[weather_air_quality_hourly<br/>tiap jam menit ke-10]
+        MART[traffic_hourly_mart<br/>tiap jam menit ke-5]
+        ML[congestion_model_daily<br/>harian 00.30 WIB]
+    end
+
+    OM --> WX
+    CSVB -->|csv_batch| WX
+    WX --> DB
+    DB --> MART --> DB
+    DB --> ML --> DB
+
+    subgraph PG[PostgreSQL - metropolia]
+        DB[(traffic_flow, traffic_incidents<br/>weather_hourly, air_quality_hourly<br/>traffic_hourly, traffic_forecast, model_runs)]
+    end
+
+    DB --> DSH[Dashboard Streamlit<br/>localhost:8501]
 ```
 
-Enam layanan Docker: `kafka` (mode KRaft), `kafka-init` (pembuat topik), `postgres`,
-`processor`, `airflow`, `dashboard`, ditambah `producer` dan `kafka-ui` yang opsional.
+| Service | Image | Port host | Fungsi |
+|---|---|:---:|---|
+| `kafka` | `apache/kafka:3.8.0` | 29092 | Penyangga pesan streaming, mode KRaft tanpa ZooKeeper |
+| `kafka-init` | `apache/kafka:3.8.0` | – | Membuat ketiga topik sekali jalan lalu berhenti |
+| `kafka-ui` | `provectuslabs/kafka-ui` | 8080 | Pemantauan topik, partisi, dan isi pesan |
+| `postgres` | `postgres:16-alpine` | 5434 | Basis data `metropolia`, skema dimuat otomatis saat volume kosong |
+| `producer` | `metropolia-etl-app` | – | Memanggil TomTom dan mengirim ke Kafka |
+| `processor` | `metropolia-etl-app` | – | Validasi, transformasi, dan pemuatan ke PostgreSQL |
+| `airflow` | `metropolia-airflow` | 8081 | Scheduler dan antarmuka web untuk 3 DAG batch |
+| `dashboard` | `metropolia-etl-app` | 8501 | Visualisasi Streamlit |
+
+Service `producer` dilewati saat memutar ulang CSV, agar data bersimulasi tidak bercampur dengan
+baris berstempel jam sekarang.
 
 ## Struktur folder
 
